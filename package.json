@@ -1,6 +1,6 @@
 {
   "name": "@mhellams/mth-store",
-  "version": "0.0.1",
+  "version": "0.2.0",
   "type": "module",
   "publishConfig": {
     "access": "public"
