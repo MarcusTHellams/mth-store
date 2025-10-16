@@ -9,26 +9,26 @@ export * from './store';
 export { batch } from './scheduler';
 
 const store1 = new Store(1);
-const store2 = new Store(2);
+const store2 = new Store(3);
 
 const computed = new Derived({
   deps: [store1, store2],
   fn() {
-    return store1.state + store2.state;
+    return store1.state * store2.state;
   },
 });
 
 const effect = new Effect({
-  deps: [store1, store2, computed],
+  deps: [computed],
   fn() {
-    console.log(`1: ${store1.state}, 2: ${store2.state} 3 Derived: ${computed.state}`);
+    console.log('computed: ', computed.state);
   },
   eager: true,
 });
 
 computed.mount();
 effect.mount();
-batch(() => {
-  store1.setState(3);
-  store2.setState(4);
-});
+store1.setState(25);
+store2.setState(100);
+store1.setState(150);
+
