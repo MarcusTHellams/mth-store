@@ -22,6 +22,10 @@ let __trackDeps = false;
 
 export const __signalToComputed = new WeakMap<Signal<unknown>, Set<Computed<unknown>>>();
 export const __computedToSignal = new WeakMap<Computed<unknown>, Set<Signal<unknown>>>();
+// Map from a Computed to Computeds that depend on it. This allows us to
+// notify only true computed dependents when a computed changes, instead of
+// traversing via signals which may be shared among unrelated computeds.
+export const __computedToComputed = new WeakMap<Computed<unknown>, Set<Computed<unknown>>>();
 
 /**
  * Tracks which Signals or Computeds have performed a write during the
@@ -88,13 +92,10 @@ function __flush_internals(relatedValues: Set<Computed<unknown>>) {
       computed.recompute(candidate);
     }
 
-    const signals = __computedToSignal.get(computed);
-    if (signals) {
-      for (const signal of signals) {
-        const relatedLinkedComputedVals = __signalToComputed.get(signal);
-        if (!relatedLinkedComputedVals) continue;
-        __flush_internals(relatedLinkedComputedVals);
-      }
+    // Notify computed dependents (computeds that read this computed).
+    const computedDependents = __computedToComputed.get(computed);
+    if (computedDependents) {
+      __flush_internals(computedDependents);
     }
   }
 }
@@ -240,6 +241,14 @@ export class Computed<T> {
       if (dep instanceof Computed) {
         // First register the intermediate computed value if it's not already registered
         dep.registerOnGraph();
+        // Record that this computed depends on `dep` so we can notify direct
+        // computed dependents when `dep` changes.
+        let relatedComputedVals = __computedToComputed.get(dep);
+        if (!relatedComputedVals) {
+          relatedComputedVals = new Set();
+          __computedToComputed.set(dep, relatedComputedVals);
+        }
+        relatedComputedVals.add(this as never);
         // Then register this computed with the dep's underlying stores
         this.registerOnGraph(dep.deps);
       } else if (dep instanceof Signal) {
@@ -264,6 +273,11 @@ export class Computed<T> {
   unregisterFromGraph(deps: Set<Signal<any> | Computed<any>> = this.deps) {
     for (const dep of deps) {
       if (dep instanceof Computed) {
+        // Remove this computed from the dep's computed-dependents mapping.
+        const relatedComputedVals = __computedToComputed.get(dep);
+        if (relatedComputedVals) {
+          relatedComputedVals.delete(this as never);
+        }
         this.unregisterFromGraph(dep.deps);
       } else if (dep instanceof Signal) {
         const relatedLinkedComputedVals = __signalToComputed.get(dep);
@@ -390,16 +404,3 @@ export class WritableComputed<T> extends Computed<T> {
   }
 }
 
-const count1 = signal(1);
-const double = writableComputed(() => count1.value * 2);
-
-effect(() => {
-  console.log('count1: ', count1.value);
-});
-
-effect(() => {
-  console.log('double: ', double.value);
-});
-double.value = 200;
-double.value = 600;
-count1.value = 20;
