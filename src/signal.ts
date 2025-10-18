@@ -404,8 +404,3 @@ export function untrack<T>(fn: () => T) {
   __currentComputed = prevCurrentComputed;
   return result;
 }
-
-const count = signal(1);
-const double = writableComputed(() => count.value * 2);
-
-double.value = 0;
