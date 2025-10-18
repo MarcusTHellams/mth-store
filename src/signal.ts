@@ -404,18 +404,3 @@ export function untrack<T>(fn: () => T) {
   __currentComputed = prevCurrentComputed;
   return result;
 }
-
-const count = signal(1);
-const double = writableComputed(() => count.value * 2);
-
-effect(() => {
-  console.log('count: ', count.value);
-});
-
-effect(() => {
-  console.log('double: ', double.value);
-});
-
-double.value = 4;
-double.value = 6;
-count.value = 4;
