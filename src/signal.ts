@@ -296,7 +296,7 @@ export class WritableComputed<T> extends Computed<T> {
   // Writable computed no longer exposes isStale; instead we rely on the
   // flush cycle to compute a single candidate value and pass it here.
   recompute = (value?: T) => {
-    if (this.#isWriting && this.#writingValue) {
+    if (this.#isWriting) {
       // If any dependency wrote this tick, prefer dependency-driven recompute
       // and discard the manual write. Otherwise commit the manual write.
       let depWritten = false;
@@ -404,3 +404,8 @@ export function untrack<T>(fn: () => T) {
   __currentComputed = prevCurrentComputed;
   return result;
 }
+
+const count = signal(1);
+const double = writableComputed(() => count.value * 2);
+
+double.value = 0;
