@@ -21,7 +21,6 @@ let __trackDeps = false;
  */
 
 export const __signalToComputed = new WeakMap<Signal<unknown>, Set<Computed<unknown>>>();
-export const __computedToSignal = new WeakMap<Computed<unknown>, Set<Signal<unknown>>>();
 // Map from a Computed to Computeds that depend on it. This allows us to
 // notify only true computed dependents when a computed changes, instead of
 // traversing via signals which may be shared among unrelated computeds.
@@ -130,6 +129,9 @@ export function __flush(signal: Signal<any> | Computed<any>) {
       const computedItems = signals.filter((s) => !(s instanceof Signal)) as Computed<unknown>[];
 
       for (const item of signalItems) {
+        const prevValue = __initialBatchValues.get(item) ?? item.prevValue;
+        item.prevValue = prevValue;
+
         const computedVals = __signalToComputed.get(item);
         if (!computedVals) continue;
         // Mark this Signal as having written during this tick so downstream
@@ -149,21 +151,6 @@ export function __flush(signal: Signal<any> | Computed<any>) {
     __isFlushing = false;
     __depsThatHaveWrittenThisTick.clear();
     __initialBatchValues.clear();
-  }
-}
-
-export function batch(fn: () => void) {
-  __batchDepth++;
-  try {
-    fn();
-  } finally {
-    __batchDepth--;
-    if (__batchDepth === 0) {
-      const pendingUpdateToFlush = __pendingUpdates.values().next().value;
-      if (pendingUpdateToFlush) {
-        __flush(pendingUpdateToFlush); // Trigger flush of all pending updates
-      }
-    }
   }
 }
 
@@ -204,6 +191,7 @@ export class Computed<T> {
   protected _value!: T;
   prevValue!: T;
   deps = new Set<Signal<any> | Computed<any>>();
+  #afterInit = false;
   protected onUpdate: (() => void) | undefined = undefined;
   protected computeFn: () => T;
   constructor(computeFn: () => T, onUpdate?: () => void) {
@@ -214,7 +202,10 @@ export class Computed<T> {
   // during a flush cycle. If `value` is provided we use it directly,
   // otherwise we call the compute function.
   recompute = (value?: T) => {
-    this.prevValue = this.peek();
+    this.prevValue = !this.#afterInit
+      ? this.computeFn()
+      : ((__initialBatchValues.get(this) ?? this.peek()) as T);
+    this.#afterInit = true;
     if (value === undefined) {
       this._value = this.computeFn();
     } else {
@@ -259,13 +250,6 @@ export class Computed<T> {
           __signalToComputed.set(dep, relatedLinkedComputedVals);
         }
         relatedLinkedComputedVals.add(this as never);
-        // Register the signal as a related store to this computed
-        let relatedSignal = __computedToSignal.get(this as never);
-        if (!relatedSignal) {
-          relatedSignal = new Set();
-          __computedToSignal.set(this as never, relatedSignal);
-        }
-        relatedSignal.add(dep);
       }
     }
   }
@@ -284,10 +268,6 @@ export class Computed<T> {
         if (relatedLinkedComputedVals) {
           relatedLinkedComputedVals.delete(this as never);
         }
-        const relatedSignals = __computedToSignal.get(this as never);
-        if (relatedSignals) {
-          relatedSignals.delete(dep);
-        }
       }
     }
     this.deps.clear();
@@ -303,6 +283,67 @@ export function computed<T>(fn: () => T) {
   __currentComputed = null;
   __trackDeps = false;
   return computed;
+}
+
+export class WritableComputed<T> extends Computed<T> {
+  #isWriting = false;
+  #writingValue: T | null = null;
+  #afterInit = false;
+
+  constructor(fn: () => T) {
+    super(fn);
+  }
+  // Writable computed no longer exposes isStale; instead we rely on the
+  // flush cycle to compute a single candidate value and pass it here.
+  recompute = (value?: T) => {
+    if (this.#isWriting && this.#writingValue) {
+      // If any dependency wrote this tick, prefer dependency-driven recompute
+      // and discard the manual write. Otherwise commit the manual write.
+      let depWritten = false;
+      for (const dep of this.deps) {
+        if (__depsThatHaveWrittenThisTick.has(dep)) {
+          depWritten = true;
+          break;
+        }
+      }
+      if (!depWritten) {
+        this.prevValue = (__initialBatchValues.get(this) ?? this.peek()) as T;
+        this._value = this.#writingValue as T;
+        this.#isWriting = false;
+        this.#writingValue = null;
+        this.onUpdate?.();
+        return;
+      }
+      // A dependency was written this tick: discard the manual write and fall
+      // through to recompute from the provided value or computeFn.
+      this.#isWriting = false;
+      this.#writingValue = null;
+    }
+    this.prevValue = !this.#afterInit
+      ? this.computeFn()
+      : ((__initialBatchValues.get(this) ?? this.peek()) as T);
+    this.#afterInit = true;
+    if (value === undefined) {
+      this._value = this.computeFn();
+    } else {
+      this._value = value;
+    }
+    this.onUpdate?.();
+  };
+  get value() {
+    if (__trackDeps && __currentComputed && __currentComputed !== this) {
+      __currentComputed.deps.add(this as never);
+    }
+    return this._value;
+  }
+  set value(newValue: T) {
+    if (dequal(newValue, this._value)) {
+      return;
+    }
+    this.#isWriting = true;
+    this.#writingValue = newValue;
+    __flush(this);
+  }
 }
 
 export function writableComputed<T>(fn: () => T) {
@@ -335,7 +376,22 @@ export class Effect {
 }
 
 export function effect(fn: () => void) {
-  return new Effect(fn);
+  return new Effect(fn).unregister;
+}
+
+export function batch(fn: () => void) {
+  __batchDepth++;
+  try {
+    fn();
+  } finally {
+    __batchDepth--;
+    if (__batchDepth === 0) {
+      const pendingUpdateToFlush = __pendingUpdates.values().next().value;
+      if (pendingUpdateToFlush) {
+        __flush(pendingUpdateToFlush); // Trigger flush of all pending updates
+      }
+    }
+  }
 }
 
 export function untrack<T>(fn: () => T) {
@@ -349,58 +405,17 @@ export function untrack<T>(fn: () => T) {
   return result;
 }
 
-export class WritableComputed<T> extends Computed<T> {
-  #isWriting = false;
-  #writingValue: T | null = null;
+const count = signal(1);
+const double = writableComputed(() => count.value * 2);
 
-  constructor(fn: () => T) {
-    super(fn);
-  }
-  // Writable computed no longer exposes isStale; instead we rely on the
-  // flush cycle to compute a single candidate value and pass it here.
-  recompute = (value?: T) => {
-    if (this.#isWriting && this.#writingValue) {
-      // If any dependency wrote this tick, prefer dependency-driven recompute
-      // and discard the manual write. Otherwise commit the manual write.
-      let depWritten = false;
-      for (const dep of this.deps) {
-        if (__depsThatHaveWrittenThisTick.has(dep)) {
-          depWritten = true;
-          break;
-        }
-      }
-      if (!depWritten) {
-        this.prevValue = this.peek();
-        this._value = this.#writingValue as T;
-        this.#isWriting = false;
-        this.#writingValue = null;
-        this.onUpdate?.();
-        return;
-      }
-      // A dependency was written this tick: discard the manual write and fall
-      // through to recompute from the provided value or computeFn.
-      this.#isWriting = false;
-      this.#writingValue = null;
-    }
-    this.prevValue = this._value;
-    if (value === undefined) {
-      this._value = this.computeFn();
-    } else {
-      this._value = value;
-    }
-    this.onUpdate?.();
-  };
-  get value() {
-    if (__trackDeps && __currentComputed && __currentComputed !== this) {
-      __currentComputed.deps.add(this as never);
-    }
-    return this._value;
-  }
-  set value(newValue: T) {
-    this.#isWriting = true;
-    this.#writingValue = newValue;
-    this._value = newValue;
-    __flush(this);
-  }
-}
+effect(() => {
+  console.log('count: ', count.value);
+});
 
+effect(() => {
+  console.log('double: ', double.value);
+});
+
+double.value = 4;
+double.value = 6;
+count.value = 4;
